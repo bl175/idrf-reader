@@ -3,3 +3,4 @@ uvicorn>=0.29,<1
 pydicom>=3.0,<4
 numpy>=1.26,<3
 python-gdcm>=3.0.22
+azure-storage-blob>=12.19,<13

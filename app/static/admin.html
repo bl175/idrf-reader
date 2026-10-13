@@ -37,6 +37,12 @@ form.add input,form.add select{min-width:150px}
 .tag.no{background:var(--present);color:var(--present-ink)}
 .chg{font-weight:700}
 .empty{padding:14px;color:var(--muted);font-size:13px}
+.cloud-tools{margin-bottom:10px}
+.cloud-tools input[type=search]{min-width:280px}
+.cloud-tools label{font-size:13px;display:flex;gap:6px;align-items:center}
+.tbl.cloud{max-height:440px;overflow:auto}
+.tbl.cloud th{position:sticky;top:0;background:var(--panel);z-index:1}
+.tbl.cloud tr.added td{color:var(--muted)}
 </style>
 </head>
 <body>
@@ -47,13 +53,28 @@ form.add input,form.add select{min-width:150px}
 <div class="wrap">
   <div class="facts" id="facts"></div>
 
+  <section id="cloudSec" hidden>
+    <h2>Cloud storage</h2>
+    <p class="lead">Studies in <b id="cloudWhere"></b>. Tick the scans to be read and add them. Each becomes a blinded case and is prepared in the background; only the prepared images are kept on the server. The patient is filled in from the patient folder; set the timepoint in the case list below.</p>
+    <div class="row cloud-tools">
+      <input type="search" id="cloudQ" placeholder="Filter, e.g. abdomen or a patient number" aria-label="Filter studies">
+      <label><input type="checkbox" id="cloudHide" checked> Hide studies already added</label>
+      <button class="btn primary" id="cloudAdd" disabled>Add selected</button>
+      <button class="btn" id="cloudReload">Refresh list</button>
+      <span class="scan" id="cloudTxt">Loading studies…</span>
+    </div>
+    <div class="tbl cloud"><table>
+      <thead><tr><th><input type="checkbox" id="cloudAll" aria-label="Select all studies shown"></th><th>Patient</th><th>Date</th><th>Study</th><th>Case</th></tr></thead>
+      <tbody id="cloudRows"></tbody></table></div>
+  </section>
+
   <section>
     <h2>Images</h2>
-    <p class="lead">Put each scan in its own folder inside <b>data/dicom</b> on the server, then scan. Each folder becomes one blinded case with a random code. Readers only ever see the code, never the folder name. Set the patient and timepoint so before-and-after pairs can be linked; tick double read for cases the second reader should also score.</p>
+    <p class="lead">Cases come from cloud storage (above, when set up) or from folders inside <b>data/dicom</b> on the server: put each scan in its own folder, then scan. Each scan becomes one blinded case with a random code. Readers only ever see the code, never the folder name. Set the patient and timepoint so before-and-after pairs can be linked; tick double read for cases the second reader should also score.</p>
     <div class="row"><button class="btn primary" id="scanBtn">Scan for new images</button><span class="scan" id="scanTxt"></span></div>
     <details class="log"><summary>Scan log</summary><pre id="log">No scan yet.</pre></details>
     <div class="tbl" style="margin-top:12px"><table>
-      <thead><tr><th>Code</th><th>Folder</th><th>Patient</th><th>Timepoint</th><th>Double read</th><th>Images</th><th>Series used</th><th>Status</th><th>Notes</th></tr></thead>
+      <thead><tr><th>Code</th><th>Folder</th><th>Patient</th><th>Timepoint</th><th>Double read</th><th>Images</th><th>Series used</th><th>Status</th><th>Notes</th><th></th></tr></thead>
       <tbody id="cases"></tbody></table></div>
   </section>
 
@@ -132,7 +153,8 @@ async function load() {
       <td>${esc(c.size)}</td><td class="wrapc">${esc(c.series)}</td>
       <td><span class="st ${c.status}">${STATUS[c.status] || esc(c.status)}</span></td>
       <td class="wrapc">${esc(c.message)}</td>
-    </tr>`).join('') : `<tr><td colspan="9" class="empty">No cases yet. Copy scans into data/dicom, one folder per scan, then choose Scan for new images.</td></tr>`;
+      <td>${c.source === 'blob' ? '<button class="btn" data-del>Remove</button>' : ''}</td>
+    </tr>`).join('') : `<tr><td colspan="10" class="empty">No cases yet. Add studies from cloud storage, or copy scans into data/dicom, one folder per scan, then choose Scan for new images.</td></tr>`;
 
   $('#readers').innerHTML = D.progress.length ? D.progress.map(p => {
     const r = D.readers.find(x => x.id === p.id);
@@ -166,7 +188,58 @@ async function load() {
   }).join('') : `<tr><td colspan="7" class="empty">Set patient and timepoint on the cases above to link diagnosis and post-induction scans.</td></tr>`;
 
   syncScan(D.import);
+  renderCloud();
 }
+
+// ---------------------------------------------------------------- cloud storage
+let C = null;
+const picked = new Set();
+const studyLabel = s => { const m = /^(\d{4})(\d{2})(\d{2})_?(.*)$/.exec(s); return m ? [`${m[1]}-${m[2]}-${m[3]}`, m[4].replace(/_+/g, ' ').trim()] : ['', s.replace(/_+/g, ' ')]; };
+async function loadCloud() {
+  $('#cloudTxt').textContent = 'Loading studies…';
+  try {
+    C = await api('/api/admin/cloud');
+    if (!C.enabled) { $('#cloudSec').hidden = true; return; }
+    $('#cloudSec').hidden = false;
+    $('#cloudWhere').textContent = C.where;
+    renderCloud();
+  } catch (e) { $('#cloudSec').hidden = false; $('#cloudTxt').textContent = e.message; }
+}
+function shownStudies() {
+  const q = $('#cloudQ').value.trim().toLowerCase(), hide = $('#cloudHide').checked;
+  const have = new Map((D ? D.cases : []).filter(c => c.source === 'blob').map(c => [c.folder, c]));
+  return C.studies.map(s => Object.assign({}, s, { c: have.get(s.path) }))
+    .filter(s => !(hide && s.c) && (!q || s.path.toLowerCase().replace(/_/g, ' ').includes(q)));
+}
+function renderCloud() {
+  if (!C || !C.enabled) return;
+  const rows = shownStudies();
+  for (const s of rows) if (s.c) picked.delete(s.path);
+  $('#cloudRows').innerHTML = rows.length ? rows.map(s => {
+    const [date, desc] = studyLabel(s.study);
+    return `<tr class="${s.c ? 'added' : ''}">
+      <td>${s.c ? '' : `<input type="checkbox" data-p="${esc(s.path)}" ${picked.has(s.path) ? 'checked' : ''} aria-label="Select ${esc(desc)}">`}</td>
+      <td>${esc(s.patient)}</td><td>${esc(date)}</td><td class="wrapc">${esc(desc)}</td>
+      <td>${s.c ? `<b>${esc(s.c.code)}</b> <span class="st ${s.c.status}">${STATUS[s.c.status] || esc(s.c.status)}</span>` : ''}</td></tr>`;
+  }).join('') : `<tr><td colspan="5" class="empty">No studies match.</td></tr>`;
+  const free = rows.filter(s => !s.c);
+  $('#cloudAll').checked = free.length > 0 && free.every(s => picked.has(s.path));
+  $('#cloudAdd').disabled = !picked.size;
+  $('#cloudAdd').textContent = picked.size ? `Add ${picked.size} selected` : 'Add selected';
+  $('#cloudTxt').textContent = `${rows.length} of ${C.studies.length} studies shown`;
+}
+$('#cloudQ').addEventListener('input', renderCloud);
+$('#cloudHide').addEventListener('change', renderCloud);
+$('#cloudReload').addEventListener('click', loadCloud);
+$('#cloudRows').addEventListener('change', e => { const p = e.target.dataset.p; if (!p) return; e.target.checked ? picked.add(p) : picked.delete(p); renderCloud(); });
+$('#cloudAll').addEventListener('change', e => { for (const s of shownStudies()) if (!s.c) e.target.checked ? picked.add(s.path) : picked.delete(s.path); renderCloud(); });
+$('#cloudAdd').addEventListener('click', async () => {
+  $('#cloudAdd').disabled = true;
+  try {
+    const r = await api('/api/admin/cloud/add', { method: 'POST', body: JSON.stringify({ studies: [...picked] }) });
+    picked.clear(); toast(`Added ${r.added} ${r.added === 1 ? 'study' : 'studies'}; preparing images`); await load();
+  } catch (e) { toast(e.message, true); renderCloud(); }
+});
 
 function syncScan(st) {
   $('#scanBtn').disabled = st.running;
@@ -180,6 +253,12 @@ function syncScan(st) {
 
 $('#scanBtn').addEventListener('click', async () => { try { const r = await api('/api/admin/rescan', { method: 'POST' }); syncScan(r.import); } catch (e) { toast(e.message, true); } });
 
+$('#cases').addEventListener('click', async e => {
+  if (!e.target.closest('button[data-del]')) return;
+  const tr = e.target.closest('tr');
+  if (!confirm(`Remove case ${tr.querySelector('b').textContent}? It can be added again from cloud storage.`)) return;
+  try { await api(`/api/admin/case/${tr.dataset.id}`, { method: 'DELETE' }); toast('Case removed'); load(); } catch (x) { toast(x.message, true); }
+});
 $('#cases').addEventListener('change', async e => {
   const el = e.target, f = el.dataset.f; if (!f) return;
   const id = el.closest('tr').dataset.id, body = {};
@@ -205,7 +284,7 @@ $('#readers').addEventListener('click', async e => {
 });
 $('#logout').addEventListener('click', async () => { await api('/api/logout', { method: 'POST' }).catch(() => {}); location.href = '/login'; });
 
-load().catch(e => toast(e.message, true));
+load().catch(e => toast(e.message, true)).then(loadCloud);
 })();
 </script>
 </body>

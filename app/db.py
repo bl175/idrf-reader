@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS cases(
   message TEXT,
   meta TEXT,
   sig TEXT,
-  imported_at TEXT
+  imported_at TEXT,
+  source TEXT NOT NULL DEFAULT 'local'
 );
 CREATE TABLE IF NOT EXISTS reads(
   reader_id INTEGER NOT NULL REFERENCES readers(id),
@@ -68,6 +69,8 @@ def init(path):
     _path = str(path)
     with connect() as c:
         c.executescript(SCHEMA)
+        if "source" not in {r["name"] for r in c.execute("PRAGMA table_info(cases)")}:
+            c.execute("ALTER TABLE cases ADD COLUMN source TEXT NOT NULL DEFAULT 'local'")
         if not c.execute("SELECT 1 FROM meta WHERE key='order_salt'").fetchone():
             c.execute("INSERT INTO meta(key, value) VALUES('order_salt', ?)", (secrets.token_hex(16),))
 

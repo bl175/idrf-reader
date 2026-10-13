@@ -15,16 +15,17 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import blob_source
 from . import config
 from . import db
-from .dicom_import import Importer
+from .dicom_import import Importer, new_code
 from .idrf import GROUPS, ITEM_IDS, SHORT, VALID
 
 log = logging.getLogger("idrf")
@@ -328,7 +329,7 @@ def _kappa(pairs):
 @app.get("/api/admin/overview")
 def overview(u=Depends(need_admin)):
     with db.connect() as c:
-        cases = [dict(r) for r in c.execute("SELECT id, code, folder, patient, timepoint, double_read, status, message, meta, imported_at FROM cases ORDER BY folder")]
+        cases = [dict(r) for r in c.execute("SELECT id, code, folder, patient, timepoint, double_read, status, message, meta, imported_at, source FROM cases ORDER BY folder")]
         readers = [dict(r) for r in c.execute("SELECT id, username, name, role, active, created_at FROM readers ORDER BY id")]
         reads = [dict(r) for r in c.execute("SELECT reader_id, case_id, answers, seconds FROM reads WHERE saved=1")]
     for cs in cases:
@@ -419,6 +420,65 @@ def patch_case(cid: int, body: CasePatch, u=Depends(need_admin)):
         with db.connect() as c:
             c.execute(f"UPDATE cases SET {', '.join(sets)} WHERE id=?", (*vals, cid))
     return {"ok": True}
+
+
+@app.delete("/api/admin/case/{cid}")
+def delete_case(cid: int, u=Depends(need_admin)):
+    with db.connect() as c:
+        r = c.execute("SELECT * FROM cases WHERE id=?", (cid,)).fetchone()
+        if not r:
+            raise HTTPException(404, "This case no longer exists.")
+        if r["source"] != "blob":
+            raise HTTPException(400, "To remove a scan from data/dicom, delete its folder and scan again.")
+        if c.execute("SELECT 1 FROM reads WHERE case_id=?", (cid,)).fetchone():
+            raise HTTPException(400, "A reader has already started this case, so it cannot be removed.")
+        c.execute("DELETE FROM cases WHERE id=?", (cid,))
+    (DATA_DIR / "cache" / f'{r["code"]}.bin.gz').unlink(missing_ok=True)
+    audit("admin", "remove_case", f'{r["code"]} {r["folder"]}')
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ cloud storage
+def _cloud_studies():
+    if not blob_source.enabled():
+        raise HTTPException(400, "Cloud storage is not set up. Set AZURE_STORAGE_CONNECTION_STRING and restart.")
+    try:
+        return blob_source.list_studies()
+    except Exception as e:
+        log.exception("cloud storage listing failed")
+        raise HTTPException(502, f"Could not read cloud storage: {str(e).splitlines()[0][:300]}")
+
+
+@app.get("/api/admin/cloud")
+def cloud_list(u=Depends(need_admin)):
+    if not blob_source.enabled():
+        return {"enabled": False, "studies": []}
+    return {"enabled": True, "where": blob_source.where(), "studies": _cloud_studies()}
+
+
+class CloudAdd(BaseModel):
+    studies: List[str]
+
+
+@app.post("/api/admin/cloud/add")
+def cloud_add(body: CloudAdd, u=Depends(need_admin)):
+    found = {s["path"]: s for s in _cloud_studies()}
+    added = 0
+    with db.connect() as c:
+        codes = {r["code"] for r in c.execute("SELECT code FROM cases")}
+        for path in dict.fromkeys(body.studies):
+            s = found.get(path)
+            if not s or c.execute("SELECT 1 FROM cases WHERE folder=?", (path,)).fetchone():
+                continue
+            code = new_code(codes)
+            codes.add(code)
+            c.execute("INSERT INTO cases(code, folder, patient, status, source) VALUES(?, ?, ?, 'pending', 'blob')",
+                      (code, path, s["patient"][:64]))
+            added += 1
+    audit("admin", "cloud_add", f"{added} studies")
+    if added:
+        importer.start()
+    return {"added": added, "import": importer.status()}
 
 
 class ReaderIn(BaseModel):
