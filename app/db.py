@@ -1,4 +1,5 @@
 import contextlib
+import os
 import secrets
 import sqlite3
 
@@ -58,6 +59,8 @@ CREATE TABLE IF NOT EXISTS audit(
 """
 
 _path = None
+# WAL needs shared memory, which network file shares (e.g. Azure App Service /home) do not support well.
+JOURNAL_MODE = os.environ.get("SQLITE_JOURNAL_MODE", "WAL").upper()
 
 
 def init(path):
@@ -73,7 +76,7 @@ def init(path):
 def connect():
     c = sqlite3.connect(_path, timeout=30, check_same_thread=False)
     c.row_factory = sqlite3.Row
-    c.execute("PRAGMA journal_mode=WAL")
+    c.execute(f"PRAGMA journal_mode={JOURNAL_MODE}")
     c.execute("PRAGMA foreign_keys=ON")
     try:
         yield c

@@ -144,6 +144,35 @@ Readers then open `http://<server-address>:8080`. Open that port in the server f
   sudo systemctl enable --now idrf-reader
   ```
 
+## Running on Azure App Service (Linux)
+
+Use a Linux Python 3.12 web app on the Basic (B1) plan or higher, with a single instance: the database is SQLite, so do not scale out.
+
+1. **Configuration > General settings**: Startup command `python run.py`. Turn on **Always on** and **HTTPS only**.
+2. **Environment variables**: add
+
+   | Name | Value |
+   |---|---|
+   | `ADMIN_PASSWORD` | a strong password |
+   | `HOST` | `0.0.0.0` |
+   | `PORT` | `8000` |
+   | `WEBSITES_PORT` | `8000` |
+   | `DATA_DIR` | `/home/data` (the persistent storage; the app folder itself is replaced on every deploy) |
+   | `SQLITE_JOURNAL_MODE` | `DELETE` |
+   | `COOKIE_SECURE` | `1` |
+   | `SCM_DO_BUILD_DURING_DEPLOYMENT` | `true` |
+
+3. Deploy from GitHub through **Deployment Center**.
+4. Upload de-identified DICOM folders to `/home/data/dicom/`, for example as a zip through the Kudu API, which extracts it in place:
+
+   ```bash
+   curl -X PUT -u '<deployment-user>' --data-binary @scans.zip https://<app>.scm.azurewebsites.net/api/zip/data/dicom/
+   ```
+
+   Then choose **Scan for new images** in the coordinator page.
+
+An App Service app is reachable from the internet by default. Limit it under **Networking > Access restrictions** (for example to the hospital's public IP addresses) or put sign-in in front of it with **Authentication**, and confirm with your institution that the de-identified images may be stored in the cloud.
+
 ## Settings
 
 All settings live in `.env` (copy from `.env.example`). Real environment variables take precedence.
@@ -158,6 +187,7 @@ All settings live in `.env` (copy from `.env.example`). Real environment variabl
 | `MAX_INPLANE` | `512` | Largest in-plane matrix sent to browsers; `256` loads four times lighter |
 | `PREFERRED_THICKNESS` | `2.5` | Slice thickness in mm preferred when a study has several contrast series |
 | `COOKIE_SECURE` | `0` | Set to `1` when served over HTTPS |
+| `SQLITE_JOURNAL_MODE` | `WAL` | Set to `DELETE` when `DATA_DIR` is on a network share, such as Azure App Service |
 
 ## Backups
 
